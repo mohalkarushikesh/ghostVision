@@ -28,6 +28,8 @@ import requests
 import speech_recognition as sr
 from ultralytics import YOLO
 
+import random
+
 try:
     import pyttsx3
 except ImportError:
@@ -39,7 +41,7 @@ from face_animation import draw_ghost_face
 # ----------------------------- Configuration -----------------------------
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 YOLO_MODEL = os.getenv("YOLO_MODEL", "yolo11n.pt")
 CAMERA_INDEX = int(os.getenv("GHOSTVISION_CAMERA", "0"))
 FRAME_WIDTH = int(os.getenv("GHOSTVISION_WIDTH", "640"))
@@ -151,6 +153,7 @@ history when relevant, but don't simply list object labels."""
             "repeat_penalty": 1.15,
             "num_predict": MAX_NEW_TOKENS,
             "num_ctx": 4096,
+            "seed": random.randint(0, 2**31 - 1)
         },
     }
     response = requests.post(
@@ -164,12 +167,25 @@ history when relevant, but don't simply list object labels."""
     return " ".join(result.split())[:500]
 
 
-def speak_with_espeak(text: str) -> bool:
-    executable = shutil.which("espeak-ng") or shutil.which("espeak")
-    if not executable:
+def speak_with_windows(text: str) -> bool:
+    """Use Windows' built-in speech engine from WSL (no Linux audio needed)."""
+    ps = shutil.which("powershell.exe")
+    if not ps:
         return False
+    # Escape every kind of single quote for PowerShell.
+    for ch in "'\u2018\u2019\u201a\u201b":
+        text = text.replace(ch, "''")
+    cmd = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"$s.Speak('{text}')"
+    )
     try:
-        subprocess.run([executable, text], check=False, timeout=45)
+        subprocess.run(
+            [ps, "-NoProfile", "-Command", cmd],
+            check=False, timeout=45,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -215,7 +231,7 @@ def speech_worker() -> None:
                     engine = None
 
             if not spoken:
-                spoken = speak_with_espeak(line)
+                spoken = speak_with_windows(line)
 
             if not spoken:
                 # No audio backend (common in WSL). Keep the mouth animating briefly
