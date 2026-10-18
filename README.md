@@ -1,114 +1,371 @@
-# 🤖 ghostVision: The Roast Master Agent - surrounded by non-living but living ghosts
+# 👻 ghostVision: The Roast Master Agent
 
-**ghostVision** is a rebellious AI agent living agent on be half of non-living objects,  It uses computer vision to identify objects in the physical world through the yolo and a local LLM "brain" like qwen to roast them—especially.
+### Surrounded by non-living things. Haunted by their opinions.
 
-Equipped with **ears** (STT), **eyes** (YOLO), and a **voice** (TTS), MoltVision doesn't just see the world; it judges it.
+**ghostVision** is a local-first, voice-controlled AI agent that gives
+everyday objects a mischievous personality. It uses computer vision to
+spot objects through your webcam, then asks a local language model to
+turn the scene into a witty, context-aware roast.
 
----
+It has **eyes** (YOLO object detection), **ears** (speech recognition),
+and a **voice** (text-to-speech). The result: an animated ghost that
+watches the room and has *opinions*.
 
-## 💡 Motivation: The "Inanimate Rebellion"
+> Your objects have been silent for too long. ghostVision gives them a
+> voice---and absolutely no chill.
 
-### What if non-living beings could talk?
+------------------------------------------------------------------------
 
-Most AI assistants are designed to be polite, helpful, and robotic. In the **MoltVision** ecosystem, we believe that objects have seen enough of human behavior to have an opinion. If your desk, your chair, or especially your "worst in the world" **POCO phone** could speak, they wouldn't offer you a weather report—they would probably roast your life choices.
+## 💡 Motivation: The Inanimate Rebellion
 
-### The Core Concept: "Spatial Satire"
+### What if non-living things could talk?
 
-This project bridges the gap between **Computer Vision** and **Anthropomorphic Humor**. By giving a digital "voice" to physical objects, we transform a standard surveillance task into an interactive comedy show.
+Most AI assistants are designed to be helpful, polite, and predictable.
+ghostVision takes a different approach: what if your desk, chair, coffee
+mug, old laptop, or questionable phone could comment on the scene?
 
----
+Instead of turning object detection into another dry list of labels,
+ghostVision uses those detections as context for playful,
+situation-aware comedy.
+
+### The core concept: Spatial satire
+
+ghostVision combines **computer vision**, **local language-model
+inference**, **speech interaction**, and **animated visuals**. It
+transforms a webcam feed into a small interactive comedy show---without
+sending prompts to a hosted LLM API.
+
+------------------------------------------------------------------------
 
 ## 🚀 Features
 
-* **Dual-Mode Intelligence:** * **QA Mode:** Standard, helpful spatial reasoning.
-* **Roast Mode:** Triggered by voice command ("*Activate Roast Mode*") to unleash savage tech critiques.
+-   **👁️ Real-time object detection:** Uses Ultralytics YOLO11n to
+    detect objects in the webcam feed.
+-   **🧠 Local LLM brain:** Uses Qwen3 8B through Ollama for creative,
+    context-aware responses.
+-   **🎙️ Voice interaction:** Say **"Ghost"** or **"GhostVision"**
+    followed by a request to address the agent.
+-   **🔥 Automatic scene roasts:** A change in detected object classes
+    can trigger a roast, subject to a cooldown.
+-   **🧩 Context-aware humour:** Sends current detections, recent scene
+    events, and recent jokes to the model to encourage variety.
+-   **🔊 Speech output:** Uses `pyttsx3` when available, with an
+    eSpeak/eSpeak NG fallback.
+-   **👻 Animated ghost face:** Reuses
+    `face_animation.draw_ghost_face(frame, is_speaking)` to animate the
+    face on the camera display.
+-   **🧵 Background workers:** Keeps language generation and speech
+    handling separate from the main camera loop.
+-   **🏠 Local LLM inference:** Ollama runs the language model on your
+    machine; no Hugging Face model folder is required by the app.
 
+> **Privacy note:** LLM prompts are sent to your local Ollama instance.
+> The current speech-recognition implementation uses Google Web Speech
+> via `SpeechRecognition`, so microphone audio is sent to Google's
+> recognition service. Speech recognition is therefore **not fully
+> offline**.
 
-* **Real-time Vision:** Powered by **YOLOv8** for lightning-fast object detection.
-* **Local Intelligence:** Uses **Qwen2.5-1.5B-Instruct** for snarky reasoning without needing an internet connection.
-* **Hands-Free Interaction:** Audio-only input and output. No typing required.
-* **Visual Personification:** Draws an animated "talking" smiley face directly on the object currently speaking.
+------------------------------------------------------------------------
 
----
+## 🧠 How It Works
+
+``` text
+Webcam
+  │
+  ▼
+OpenCV frame capture
+  │
+  ▼
+YOLO11n object detection
+  │
+  ├──► Annotated camera feed
+  │
+  ▼
+Current detections + recent scene history
+  │
+  ▼
+Ollama: Qwen3 8B
+  │
+  ▼
+Short, context-aware roast
+  │
+  ▼
+pyttsx3 / eSpeak NG ──► Speakers
+  │
+  ▼
+Animated ghost face reacts while speaking
+
+Microphone ──► SpeechRecognition / Google Web Speech
+                       │
+                       └──► Voice request to the local Ollama model
+```
+
+The object labels are clues for the joke, not proof of hidden facts.
+ghostVision is intended for playful commentary---not surveillance or
+high-stakes decisions.
+
+------------------------------------------------------------------------
 
 ## 🛠️ Tech Stack
 
-* **Vision:** `ultralytics` (YOLOv8)
-* **Brain:** `transformers` (Qwen2.5-1.5B-Instruct)
-* **Speech-to-Text:** `SpeechRecognition` + `PyAudio`
-* **Text-to-Speech:** `pyttsx3`
-* **UI/Processing:** `OpenCV`, `threading`, `torch`
+  Component                    Technology
+  ---------------------------- -------------------------------------------
+  Object detection             Ultralytics YOLO11n
+  Local language model         Qwen3 8B
+  Local model runtime          Ollama
+  Camera and rendering         OpenCV
+  Speech-to-text               SpeechRecognition + PyAudio
+  Speech recognition service   Google Web Speech API
+  Text-to-speech               `pyttsx3`, with eSpeak/eSpeak NG fallback
+  Concurrency                  Python `threading` and `queue`
+  Animated face                `face_animation.py`
 
----
+------------------------------------------------------------------------
 
 ## 📦 Installation & Setup
 
-### 1. Clone the Repositories
+### 1. Prerequisites
 
-Ensure you have **Git LFS** installed. Download the model locally to bypass SSL and internet issues:
+-   Python 3.10 or newer
+-   A working webcam and microphone accessible from your environment
+-   [Ollama](https://ollama.com/) installed and running
+-   A Linux audio backend for TTS if running in WSL2
+-   The `face_animation.py` module in the project directory
 
-```bash
-git lfs install
-git -c http.sslVerify=false clone https://www.modelscope.cn/qwen/Qwen2.5-1.5B-Instruct.git
+### 2. Pull the language model
 
+Start Ollama, then run:
+
+``` bash
+ollama pull qwen3:8b
+ollama list
 ```
 
-### 2. Install Dependencies
+Check that the Ollama API is reachable:
 
-```bash
-pip install torch transformers ultralytics opencv-python pyttsx3 SpeechRecognition pyaudio accelerate
-
+``` bash
+curl http://127.0.0.1:11434/api/tags
 ```
 
----
+The default model is `qwen3:8b`. You can change it with the
+`OLLAMA_MODEL` environment variable.
+
+### 3. Install system dependencies on Ubuntu/WSL2
+
+``` bash
+sudo apt update
+sudo apt install -y espeak-ng portaudio19-dev python3-tk
+```
+
+**WSL2 note:** Webcam, microphone, and audio passthrough depend on your
+Windows/WSL setup. If OpenCV cannot open the camera, verify that the
+device is exposed to Linux or try a different camera index.
+
+### 4. Create and activate a virtual environment
+
+From the project directory:
+
+``` bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+### 5. Install Python dependencies
+
+``` bash
+python -m pip install requests opencv-python ultralytics SpeechRecognition PyAudio pyttsx3
+```
+
+The first YOLO run may download `yolo11n.pt` automatically if the
+weights are not already cached.
+
+### 6. Run ghostVision
+
+Save the main script as `roast-master.py`, keep `face_animation.py`
+beside it, and run:
+
+``` bash
+python roast-master.py
+```
+
+Press **Q** in the camera window to quit.
+
+------------------------------------------------------------------------
 
 ## 🎮 How to Use
 
-1. **Launch the Agent:** `python roast_master.py`
-2. **Standard QA:** Ask, *"What do you see?"*
-3. **Trigger Roast Mode:** Say, *"Activate Roast Mode."*
-4. **The POCO Test:** Show your phone and ask, *"What do you think of my hardware?"*
+1.  **Launch the agent:** Run `python roast-master.py`.
+2.  **Wait for startup:** ghostVision checks Ollama, loads YOLO, and
+    opens the camera.
+3.  **Show it something:** Point the camera at an object. Detected
+    classes appear in the annotated feed.
+4.  **Summon the ghost:** Say **"Ghost, what do you think of this
+    phone?"** or **"GhostVision, roast this setup."**
+5.  **Watch and listen:** The model generates a line, the TTS system
+    speaks it, and the animated ghost face reacts while speaking.
+6.  **Try scene-triggered roasts:** A change in detected object classes
+    can automatically trigger a roast after the cooldown.
 
----
+The current implementation does **not** require the exact phrase
+"Activate Roast Mode." It also does not promise to draw a separate face
+on every detected object or show scrolling subtitles; the ghost
+animation is drawn on the camera display.
 
-## 🔥 The Burn Log (Gallery)
+------------------------------------------------------------------------
 
-| Object Detected | AI Roast Response |
-| --- | --- |
-| **POCO Phone** | "I've seen faster processing in a potato; this phone is basically a space heater that occasionally makes calls." |
-| **Old Laptop** | "That fan noise isn't cooling; it's a scream for help from 2012." |
-| **Empty Coffee Cup** | "Much like your Git history, this cup is empty and full of stains." |
-| **Human Face** | "Detected: One organic life form. Initializing eye-roll sequence for spending money on that POCO." |
+## 🔥 The Burn Log
 
----
+Example lines---the model generates its own response at runtime, so
+exact wording will vary.
 
-## 🧠 The "Molt" Philosophy
+  -----------------------------------------------------------------------
+  Object or scene                     Example roast
+  ----------------------------------- -----------------------------------
+  POCO phone                          "That phone has the confidence of a
+                                      flagship and the survival instincts
+                                      of a microwave."
 
-> *"Why settle for a helpful assistant when you can have an agent with an opinion? Most hardware is a bottleneck; MoltVision is the wake-up call."*
+  Old laptop                          "That fan isn't cooling the CPU;
+                                      it's filing a noise complaint."
 
----
+  Empty coffee cup                    "Empty already? Your productivity
+                                      arc has a familiar plot."
 
-## ⚠️ Troubleshooting
+  Desk full of gadgets                "A whole ecosystem of devices, and
+                                      somehow the biggest bottleneck is
+                                      still the operator."
 
-* **SSL Errors:** The script uses `local_files_only=True`. Ensure the folder name in your code matches the cloned directory.
-* **Microphone Issues:** Ensure your default system mic is active. The script uses Google STT (online) by default but can be swapped for Sphinx for 100% offline use.
+  Mysterious scene                    "Nothing detected. Either the room
+                                      is empty or the ghosts have learned
+                                      stealth."
+  -----------------------------------------------------------------------
 
----
+------------------------------------------------------------------------
 
-**Would you like me to add a section on how to customize the "Roast Intensity" levels in the code?**\
+## ⚙️ Configuration
 
+You can configure the app with environment variables before running it.
 
+  ---------------------------------------------------------------------------------
+  Variable                       Default                    Purpose
+  ------------------------------ -------------------------- -----------------------
+  `OLLAMA_HOST`                  `http://127.0.0.1:11434`   Ollama API base URL
 
-Exactly. Your approach is now a **"Hands-Free Ghost Interaction."** ### The Simple 3-Step Flow:
+  `OLLAMA_MODEL`                 `qwen3:8b`                 Ollama model tag
 
-1. **The Setup:** Run the script and wait for the AI to say, *"I am the ghost in your machine."* (This means the 3GB Qwen brain is loaded and ready).
-2. **The Sight:** Point your camera at your **POCO phone** (or any object). You will see a green box appear around it on your screen.
-3. **The Summoning:** Just talk. Ask, *"What do you think of this phone?"* or even just make a sound.
+  `YOLO_MODEL`                   `yolo11n.pt`               YOLO weights/model
 
-### What Happens Next:
+  `GHOSTVISION_CAMERA`           `0`                        Camera index
 
-* **The Possession:** A ghostly smiley face will appear **directly on the phone** (and every other detected object) on your screen.
-* **The Roast:** The AI will "throw shade" through your speakers while the subtitles scroll at the bottom of the video feed.
-* **The Cycle:** Once it finishes talking, the faces disappear, and it goes back to "Listening" mode for your next question.
+  `GHOSTVISION_WIDTH`            `640`                      Camera frame width
 
-**Would you like me to add a feature where the AI "remembers" your previous roasts, so it can bring them up again if you show it the same phone twice?**
+  `GHOSTVISION_HEIGHT`           `480`                      Camera frame height
+
+  `GHOSTVISION_IMGSZ`            `416`                      YOLO inference image
+                                                            size
+
+  `GHOSTVISION_CONFIDENCE`       `0.35`                     Detection confidence
+                                                            threshold
+
+  `GHOSTVISION_ROAST_COOLDOWN`   `12`                       Minimum seconds between
+                                                            automatic scene roasts
+  ---------------------------------------------------------------------------------
+
+Example:
+
+``` bash
+OLLAMA_MODEL=qwen3:8b GHOSTVISION_ROAST_COOLDOWN=20 python roast-master.py
+```
+
+For a different model, pull it with Ollama first and then set
+`OLLAMA_MODEL` to its installed tag.
+
+------------------------------------------------------------------------
+
+## 🧠 The Molt Philosophy
+
+> "Why settle for a helpful assistant when your hardware could have a
+> personality? The objects are innocent. Their opinions about your setup
+> are not."
+
+ghostVision is an experiment in **local AI, computer vision, and playful
+human-computer interaction**. Its goal is to make AI feel less like a
+command line and more like a mischievous presence in the room.
+
+------------------------------------------------------------------------
+
+## 🧯 Troubleshooting
+
+### Ollama connection refused
+
+Make sure Ollama is running and check:
+
+``` bash
+ollama list
+curl http://127.0.0.1:11434/api/tags
+```
+
+If Ollama runs on Windows rather than inside WSL2, `127.0.0.1` may not
+point to the Windows host in your setup. Set `OLLAMA_HOST` to the
+reachable host address.
+
+### Model not found
+
+``` bash
+ollama pull qwen3:8b
+ollama list
+```
+
+If you use another model, set `OLLAMA_MODEL` to the exact installed
+model tag.
+
+### Camera cannot open
+
+Check camera access from WSL2 and try another index:
+
+``` bash
+GHOSTVISION_CAMERA=1 python roast-master.py
+```
+
+### Microphone does not work
+
+Check that PyAudio can access a microphone from your environment. The
+current Google speech-recognition path also requires network access.
+
+### `pyttsx3` voice error
+
+Install eSpeak NG:
+
+``` bash
+sudo apt install -y espeak-ng
+espeak-ng "GhostVision is awake."
+```
+
+The script attempts to fall back to eSpeak if `pyttsx3` fails.
+
+### Slow responses
+
+Language generation and speech are CPU/RAM dependent. Close other heavy
+applications, lower `GHOSTVISION_IMGSZ`, or use a smaller Ollama model
+if response latency is too high.
+
+------------------------------------------------------------------------
+
+## 🗺️ Roadmap Ideas
+
+-   Optional fully offline speech recognition (for example, a local
+    Whisper-based path)
+-   Configurable roast intensity and comedy styles
+-   Persistent memory for recurring objects and past jokes
+-   More robust scene-change tracking than object-class changes alone
+-   Optional object-specific overlays and on-screen captions
+
+------------------------------------------------------------------------
+
+## 📜 Disclaimer
+
+ghostVision is an experimental comedy project. Object detection can be
+wrong, speech recognition can mishear you, and generated roasts can be
+awkward or inaccurate. Keep the humour playful and do not use the system
+to identify people or make consequential judgments.

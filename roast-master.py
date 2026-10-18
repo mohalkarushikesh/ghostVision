@@ -1,142 +1,419 @@
-import cv2
-import torch
-import pyttsx3
-import speech_recognition as sr
-import threading
-import queue
+#!/usr/bin/env python3
+"""
+GhostVision: local, context-aware roast assistant.
+
+Stack:
+- Ultralytics YOLO11n for webcam object detection
+- Ollama (default: qwen3:8b) for creative, context-aware responses
+- SpeechRecognition + Google Web Speech API for microphone input
+- pyttsx3 / eSpeak NG for local text-to-speech
+- face_animation.draw_ghost_face(frame, cx, cy, scale, is_speaking, frame_count)
+
+Run from the GhostVision project directory after installing dependencies and pulling
+the Ollama model.
+"""
+
+from __future__ import annotations
+
 import os
-import ssl
-import time # Added for sleep
+import queue
+import shutil
+import subprocess
+import threading
+import time
+from collections import deque
+
+import cv2
+import requests
+import speech_recognition as sr
 from ultralytics import YOLO
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from face_animation import draw_ghost_face 
 
-# --- SETUP ---
-ssl._create_default_https_context = ssl._create_unverified_context
-os.environ['CURL_CA_BUNDLE'] = ''
+try:
+    import pyttsx3
+except ImportError:
+    pyttsx3 = None
 
-MODEL_PATH = "./Qwen2.5-1.5B-Instruct" 
-vision_model = YOLO('yolov8n.pt')
+from face_animation import draw_ghost_face
 
-voice_queue = queue.Queue()
-is_speaking = False
-is_thinking = False # NEW: Prevents ear from listening while brain works
-last_ai_text = "Target locked."
-current_objects = []
-frame_count = 0
 
-# --- VOICE WORKER ---
-def ghost_voice_worker():
-    global is_speaking
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 180)
-    while True:
-        text = voice_queue.get()
-        is_speaking = True
-        engine.say(text)
-        engine.runAndWait()
-        is_speaking = False
+# ----------------------------- Configuration -----------------------------
 
-threading.Thread(target=ghost_voice_worker, daemon=True).start()
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+YOLO_MODEL = os.getenv("YOLO_MODEL", "yolo11n.pt")
+CAMERA_INDEX = int(os.getenv("GHOSTVISION_CAMERA", "0"))
+FRAME_WIDTH = int(os.getenv("GHOSTVISION_WIDTH", "640"))
+FRAME_HEIGHT = int(os.getenv("GHOSTVISION_HEIGHT", "480"))
+YOLO_IMGSZ = int(os.getenv("GHOSTVISION_IMGSZ", "416"))
+YOLO_CONFIDENCE = float(os.getenv("GHOSTVISION_CONFIDENCE", "0.35"))
+ROAST_COOLDOWN_SECONDS = float(os.getenv("GHOSTVISION_ROAST_COOLDOWN", "12"))
+# Ghost face size in PIXELS (glow radius is about scale * 2.8).
+FACE_SCALE = int(os.getenv("GHOSTVISION_FACE_SCALE", "28"))
+MAX_CONTEXT_EVENTS = 12
+MAX_NEW_TOKENS = 110
+HTTP_TIMEOUT_SECONDS = 90
 
-# --- THE BRAIN ---
-print("--- Loading Brain... ---")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_PATH, device_map="cpu", torch_dtype=torch.float16, low_cpu_mem_usage=True
-)
+SYSTEM_PROMPT = """You are GhostVision, a witty, theatrical, slightly spooky roast-comedian
+living inside a webcam. Your job is to make short, creative, context-aware roasts based
+on the detected objects and what the user says.
 
-def trigger_roast(obj_name):
-    global last_ai_text, is_thinking
-    # This MUST print in your terminal. If it doesn't, the thread didn't start.
-    print(f"!!! BRAIN ENGAGED for: {obj_name} !!!") 
-    
+Rules:
+- Be playful and clever, not cruel. No slurs, threats, sexual content, or attacks on
+  protected traits. Avoid sensitive personal assumptions.
+- Roast the situation, objects, posture-free scene, or harmless choices—not a person's
+  body, identity, disability, or other sensitive traits.
+- Use the visible object labels as clues, not as proof of hidden facts.
+- Do not claim to know a person's name, feelings, job, wealth, or intentions.
+- Usually produce one punchy sentence, ideally 8–25 words.
+- Avoid repeating recent jokes. Vary style: deadpan, absurd, mock-dramatic, nerdy,
+  spooky, or sarcastic.
+- If the user asks a question, answer it briefly with GhostVision's personality.
+- If detections are empty or uncertain, do not invent objects. You may make a joke
+  about the mysterious scene instead.
+- Output only the line to be spoken; no labels, quotation marks, or stage directions.
+"""
+
+# Shared state. Webcam inference stays on the main thread; Ollama and audio use workers.
+stop_event = threading.Event()
+is_speaking = threading.Event()
+state_lock = threading.Lock()
+scene_labels: list[str] = []
+scene_updated_at = 0.0
+recent_events: deque[str] = deque(maxlen=MAX_CONTEXT_EVENTS)
+recent_roasts: deque[str] = deque(maxlen=6)
+last_auto_roast_at = 0.0
+work_queue: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=4)
+
+
+def set_scene(labels: list[str]) -> None:
+    global scene_labels, scene_updated_at
+    with state_lock:
+        scene_labels = labels
+        scene_updated_at = time.time()
+        if labels:
+            event = "Detected: " + ", ".join(labels)
+            if not recent_events or recent_events[-1] != event:
+                recent_events.append(event)
+
+
+def get_context() -> tuple[list[str], list[str]]:
+    with state_lock:
+        return list(scene_labels), list(recent_events)
+
+
+def check_ollama() -> None:
     try:
-        prompt = f"<|im_start|>system\nYou are a savage ghost.<|im_end|>\n<|im_start|>user\nRoast this {obj_name} in one short sentence.<|im_end|>\n<|im_start|>assistant\n"
-        inputs = tokenizer(prompt, return_tensors="pt").to("cpu")
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs, 
-                max_new_tokens=20, 
-                do_sample=False, # False is faster for low RAM
-                pad_token_id=tokenizer.eos_token_id
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=4)
+        response.raise_for_status()
+        models = response.json().get("models", [])
+        names = [m.get("name", "") for m in models]
+        if not any(name == OLLAMA_MODEL or name.startswith(OLLAMA_MODEL + ":") for name in names):
+            raise RuntimeError(
+                f"Ollama is running, but model '{OLLAMA_MODEL}' is not installed.\n"
+                f"Available models: {', '.join(names) or '(none)'}\n"
+                f"Run: ollama pull {OLLAMA_MODEL}"
             )
-        
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True).split("assistant")[-1].strip()
-        print(f"--- Ghost Success: {response} ---")
-        last_ai_text = response
-        voice_queue.put(response)
-    except Exception as e:
-        print(f"!!! BRAIN ERROR: {e} !!!")
-    finally:
-        # Give the CPU a moment to breathe before allowing more listening
-        time.sleep(1)
-        is_thinking = False
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {OLLAMA_HOST}.\n"
+            "Start Ollama in WSL2 (or configure OLLAMA_HOST), then retry."
+        ) from exc
 
-def listen_loop():
-    global is_thinking
-    r = sr.Recognizer()
-    r.energy_threshold = 400 
-    
-    with sr.Microphone() as source:
-        print("--- Mic: Calibrating for 1 second... ---")
-        r.adjust_for_ambient_noise(source, duration=1)
-        
-        while True:
-            # Check the flags
-            if not is_speaking and not is_thinking:
+
+def ask_ollama(user_text: str, trigger: str) -> str:
+    labels, events = get_context()
+    scene = ", ".join(labels) if labels else "No confident objects currently detected"
+    history = "\n".join(f"- {event}" for event in events[-8:]) or "- No recent scene events"
+    recent_jokes = "\n".join(f"- {joke}" for joke in list(recent_roasts)[-5:]) or "- None yet"
+
+    prompt = f"""Current trigger: {trigger}
+Current camera detections: {scene}
+Recent scene history:
+{history}
+Recent jokes to avoid repeating:
+{recent_jokes}
+User said: {user_text or "(no spoken request; create a scene-based roast)"}
+
+Create one fresh, context-aware GhostVision line. Use the current detections and recent
+history when relevant, but don't simply list object labels."""
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {
+            "temperature": 0.9,
+            "top_p": 0.92,
+            "repeat_penalty": 1.15,
+            "num_predict": MAX_NEW_TOKENS,
+            "num_ctx": 4096,
+        },
+    }
+    response = requests.post(
+        f"{OLLAMA_HOST}/api/chat", json=payload, timeout=HTTP_TIMEOUT_SECONDS
+    )
+    response.raise_for_status()
+    result = response.json().get("message", {}).get("content", "").strip()
+    if not result:
+        raise RuntimeError("Ollama returned an empty response.")
+    # Keep the spoken line short even if the model ignores the instruction.
+    return " ".join(result.split())[:500]
+
+
+def speak_with_espeak(text: str) -> bool:
+    executable = shutil.which("espeak-ng") or shutil.which("espeak")
+    if not executable:
+        return False
+    try:
+        subprocess.run([executable, text], check=False, timeout=45)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def speech_worker() -> None:
+    """Serially generate and speak lines so audio never overlaps itself."""
+    engine = None
+    if pyttsx3 is not None:
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty("rate", 175)
+            engine.setProperty("volume", 0.95)
+        except Exception as exc:
+            print(f"[TTS] pyttsx3 unavailable; will try eSpeak NG: {exc}")
+            engine = None
+
+    while not stop_event.is_set():
+        try:
+            trigger, user_text = work_queue.get(timeout=0.25)
+        except queue.Empty:
+            continue
+
+        try:
+            is_speaking.set()
+            print(f"\n[GhostVision] Thinking ({OLLAMA_MODEL})...")
+            line = ask_ollama(user_text, trigger)
+            print(f"[GhostVision] {line}")
+            recent_roasts.append(line)
+
+            spoken = False
+            if engine is not None:
                 try:
-                    print("--- GHOST IS LISTENING ---")
-                    audio = r.listen(source, timeout=3, phrase_time_limit=2)
-                    user_text = r.recognize_google(audio).lower()
-                    print(f"-> Ghost heard: {user_text}")
+                    engine.say(line)
+                    engine.runAndWait()
+                    spoken = True
+                except Exception as exc:
+                    print(f"[TTS] pyttsx3 failed; trying eSpeak NG: {exc}")
+                    try:
+                        engine.stop()
+                    except Exception:
+                        pass
+                    engine = None
 
-                    # Use a local snapshot of objects to avoid empty list errors
-                    if len(current_objects) > 0:
-                        target = current_objects[0]
-                        is_thinking = True # LOCK
-                        print(f"-> Starting Roast Thread for {target}...")
-                        t = threading.Thread(target=trigger_roast, args=(target,))
-                        t.start()
-                    else:
-                        print("-> Heard you, but I don't see any objects to roast!")
-                        
-                except (sr.WaitTimeoutError, sr.UnknownValueError):
-                    continue 
-                except Exception as e:
-                    print(f"Mic Loop Error: {e}")
-            else:
-                # Ghost is busy speaking or thinking, wait
-                time.sleep(0.5)
+            if not spoken:
+                spoken = speak_with_espeak(line)
 
-threading.Thread(target=listen_loop, daemon=True).start()
+            if not spoken:
+                # No audio backend (common in WSL). Keep the mouth animating briefly
+                # so the on-screen ghost still "talks".
+                time.sleep(min(6.0, 0.35 * len(line.split())))
+        except requests.RequestException as exc:
+            print(f"[Ollama] Request failed: {exc}")
+        except Exception as exc:
+            print(f"[GhostVision] Error: {exc}")
+        finally:
+            is_speaking.clear()
+            work_queue.task_done()
 
-# --- THE EYES ---
-cap = cv2.VideoCapture(0)
-while cap.isOpened():
-    success, frame = cap.read()
-    if not success: break
-    frame_count += 1
 
-    results = vision_model(frame, stream=True, conf=0.4, verbose=False)
-    current_objects = []
+def enqueue_line(trigger: str, user_text: str = "") -> bool:
+    try:
+        work_queue.put_nowait((trigger, user_text))
+        return True
+    except queue.Full:
+        print("[GhostVision] Busy right now; skipping this trigger.")
+        return False
 
-    for r in results:
-        for box in r.boxes:
-            name = vision_model.names[int(box.cls[0])]
-            current_objects.append(name)
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            scale = (x2 - x1) // 6
 
-            draw_ghost_face(frame, cx, cy, scale, is_speaking, frame_count)
+def microphone_worker() -> None:
+    """Google speech recognition is online; Ollama generation remains local."""
+    recognizer = sr.Recognizer()
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.7
 
-    if is_speaking:
-        cv2.putText(frame, last_ai_text, (20, frame.shape[0]-20), 1, 1.2, (0, 255, 0), 2)
+    try:
+        microphone = sr.Microphone()
+    except Exception as exc:
+        print(f"[Mic] Could not open microphone: {exc}")
+        print("[Mic] Camera mode will continue; speech input is disabled.")
+        return
 
-    cv2.imshow("GhostVision", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'): break
+    with microphone as source:
+        print("[Mic] Calibrating ambient noise...")
+        try:
+            recognizer.adjust_for_ambient_noise(source, duration=0.8)
+        except Exception as exc:
+            print(f"[Mic] Calibration warning: {exc}")
 
-cap.release()
-cv2.destroyAllWindows()
+    print("[Mic] Listening. Say 'Ghost' or 'GhostVision' to address me.")
+    while not stop_event.is_set():
+        try:
+            with microphone as source:
+                audio = recognizer.listen(source, timeout=1.0, phrase_time_limit=6)
+            spoken = recognizer.recognize_google(audio).strip()
+            if not spoken:
+                continue
+            print(f"[You] {spoken}")
+            lowered = spoken.lower()
+            if "ghostvision" in lowered or "ghost" in lowered:
+                cleaned = spoken
+                for word in ("GhostVision", "ghostvision", "Ghost", "ghost"):
+                    cleaned = cleaned.replace(word, "").strip(" ,.!?")
+                enqueue_line("spoken request", cleaned or "Roast the current scene.")
+        except sr.WaitTimeoutError:
+            continue
+        except sr.UnknownValueError:
+            continue
+        except sr.RequestError as exc:
+            print(f"[Mic] Speech recognition service unavailable: {exc}")
+            time.sleep(2)
+        except Exception as exc:
+            print(f"[Mic] Listener warning: {exc}")
+            time.sleep(1)
+
+
+def open_camera() -> cv2.VideoCapture:
+    """Open the webcam with settings that work reliably over usbipd/WSL2."""
+    camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
+    # FOURCC must be set before width/height so the driver negotiates MJPG.
+    camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    camera.set(cv2.CAP_PROP_FPS, 30)
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not camera.isOpened():
+        raise RuntimeError(
+            f"Could not open camera index {CAMERA_INDEX}. "
+            "Check WSL2 webcam access (usbipd attach) or try GHOSTVISION_CAMERA=1."
+        )
+    return camera
+
+
+def main() -> None:
+    global last_auto_roast_at
+
+    print("Checking local Ollama...")
+    check_ollama()
+    print(f"[Ollama] Connected; model: {OLLAMA_MODEL}")
+
+    print(f"Loading detector: {YOLO_MODEL}")
+    detector = YOLO(YOLO_MODEL)
+
+    camera = open_camera()
+
+    threading.Thread(target=speech_worker, name="ghost-speech", daemon=True).start()
+    threading.Thread(target=microphone_worker, name="ghost-mic", daemon=True).start()
+
+    print("\nGhostVision is live. Press Q in the camera window to quit.")
+    print("Auto-roasts trigger when the detected scene changes; say 'Ghost ...' for a request.")
+
+    previous_signature: tuple[str, ...] = ()
+    last_detection_time = 0.0
+    cached_annotated = None
+    frame_count = 0
+
+    try:
+        while not stop_event.is_set():
+            ok, frame = camera.read()
+            if not ok:
+                print("[Camera] Frame read failed; retrying...")
+                time.sleep(0.1)
+                continue
+
+            now = time.time()
+            # Run detector a few times per second; reuse last overlay between inference passes.
+            if now - last_detection_time >= 0.25 or cached_annotated is None:
+                result = detector.predict(
+                    source=frame,
+                    imgsz=YOLO_IMGSZ,
+                    conf=YOLO_CONFIDENCE,
+                    verbose=False,
+                    device="cpu",
+                )[0]
+                labels = []
+                if result.boxes is not None:
+                    for class_id in result.boxes.cls.tolist():
+                        name = detector.names.get(int(class_id), str(class_id))
+                        if name not in labels:
+                            labels.append(name)
+                labels = labels[:8]
+                set_scene(labels)
+                signature = tuple(sorted(labels))
+
+                # Trigger only when the set of visible object classes changes.
+                if signature != previous_signature and signature and (
+                    now - last_auto_roast_at >= ROAST_COOLDOWN_SECONDS
+                ):
+                    if enqueue_line("scene changed"):
+                        last_auto_roast_at = now
+                    previous_signature = signature
+                elif signature != previous_signature:
+                    previous_signature = signature
+
+                cached_annotated = result.plot()
+                last_detection_time = now
+
+            display = cached_annotated.copy() if cached_annotated is not None else frame.copy()
+
+            # Ghost avatar in the top-right corner. FACE_SCALE is in pixels;
+            # the glow ring radius is about FACE_SCALE * 2.8.
+            frame_count += 1
+            h, w = display.shape[:2]
+            margin = int(FACE_SCALE * 2.8) + 10
+            draw_ghost_face(
+                display,
+                cx=w - margin,
+                cy=margin,
+                scale=FACE_SCALE,
+                is_speaking=is_speaking.is_set(),
+                frame_count=frame_count,
+            )
+
+            cv2.putText(
+                display,
+                f"LLM: {OLLAMA_MODEL} | Say 'Ghost ...' to ask | Q: quit",
+                (10, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (80, 255, 120),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.imshow("GhostVision", display)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        stop_event.set()
+        camera.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nStopping GhostVision...")
+        stop_event.set()
+    except Exception as error:
+        print(f"\n[FATAL] {error}")
+        print(
+            "\nQuick checks:\n"
+            "  ollama list\n"
+            "  curl http://127.0.0.1:11434/api/tags\n"
+            "  python -c \"from face_animation import draw_ghost_face; print('animation import OK')\""
+        )
+        raise

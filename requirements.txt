@@ -9,3 +9,4 @@ pyaudio
 threading
 #llama-cpp-python alternative #bitsandbytes alternative ctransformers
 
+#espeak-ng portaudio19-dev python3-tk via linux/wsl
